@@ -13,7 +13,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 
-from commands import IngTranscribeCommand, IngGPTCommand
+from commands import IngTranscribeCommand, IngGPTCommand, ExportChatCommand
 
 from control import ClientHandler, ClientFactory
 import typer
@@ -45,9 +45,9 @@ def add_client(session: str):
     :return: None
     """
     new_client = {
-            "session_name": session,
-            "commands": ["IngTranscribeCommand", "IngGPTCommand"]
-        }
+        "session_name": session,
+        "commands": ["IngTranscribeCommand", "IngGPTCommand", "ExportChatCommand"]
+    }
     client_data.append(new_client)
     # save json
     with open(clients_file_path, 'w') as f:
