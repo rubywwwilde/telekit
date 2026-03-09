@@ -1,15 +1,24 @@
-import os
 from io import BytesIO
+import importlib
 
 from telethon import TelegramClient, events
 from telethon.errors import MessageTooLongError, MediaCaptionTooLongError, MessageNotModifiedError, \
     MessageDeleteForbiddenError
 
-from commands import IngTranscribeCommand, IngGPTCommand
 from utils import CustomMarkdown
 from functools import wraps
+from pathlib import Path
 
 import logging
+
+from telekit_config import Settings, load_settings
+from telekit_config import validate_session_name
+
+ING_TRANSCRIBE_COMMAND_NAME = "@ingTranscribe"
+COMMAND_MODULES = {
+    "IngTranscribeCommand": ("commands.ing_transcribe.ing_transcribe", "IngTranscribeCommand"),
+    "IngGPTCommand": ("commands.ing_gpt", "IngGPTCommand"),
+}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -148,7 +157,7 @@ class EventHandler:
             raise TypeError(f"Expected an instance of EventAdapter, but got {type(event_adapter).__name__}.")
 
         if event_adapter.is_voice():
-            return IngTranscribeCommand.command_name
+            return ING_TRANSCRIBE_COMMAND_NAME
         else:
             command_text = event_adapter.get_message_text()
             if not command_text:
@@ -180,8 +189,14 @@ class ClientHandler:
             Downloads the voice message from the given message and saves it to the specified filepath.
     """
 
-    def __init__(self, client, command_classes):
+    TEXT_CHUNK_LIMIT = 3500
+    MEDIA_CAPTION_LIMIT = 900
+    MEDIA_OVERFLOW_NOTICE = "Transcription continues below."
+
+    def __init__(self, client, command_classes, settings: Settings | None = None, session_name: str | None = None):
         self.client = client
+        self.settings = settings or load_settings()
+        self.session_name = session_name or "unknown"
         client.parse_mode = CustomMarkdown()
         self.command_classes = command_classes
         self.event_handler = EventHandler(self)
@@ -195,6 +210,20 @@ class ClientHandler:
 
     async def start(self):
         await self._register_event_handlers()
+        await self.client.connect()
+        is_authorized = await self.client.is_user_authorized()
+        logging.info(
+            "Starting Telegram session '%s' from %s",
+            self.session_name,
+            getattr(self.client.session, "filename", "unknown"),
+        )
+        if is_authorized:
+            logging.info("Session '%s' is already authorized.", self.session_name)
+        else:
+            logging.warning(
+                "Session '%s' is not authorized yet. Telegram will prompt for phone and login code.",
+                self.session_name,
+            )
         await self.client.start()
 
     async def handle_event(self, event):
@@ -202,6 +231,60 @@ class ClientHandler:
 
     async def download_media(self, message, file, progress_callback=None) -> str or None:
         return await self.client.download_media(message, file=file, progress_callback=progress_callback)
+
+    @classmethod
+    def split_text_chunks(cls, text, limit=None):
+        limit = limit or cls.TEXT_CHUNK_LIMIT
+        normalized_text = (text or "").strip()
+        if not normalized_text:
+            return []
+
+        chunks = []
+        remaining = normalized_text
+        while len(remaining) > limit:
+            split_at = cls._find_chunk_boundary(remaining, limit)
+            chunk = remaining[:split_at].strip()
+            if not chunk:
+                chunk = remaining[:limit].strip()
+                split_at = len(chunk)
+            chunks.append(chunk)
+            remaining = remaining[split_at:].strip()
+
+        if remaining:
+            chunks.append(remaining)
+
+        return chunks
+
+    @staticmethod
+    def _find_chunk_boundary(text, limit):
+        split_at = text.rfind("\n", 0, limit + 1)
+        if split_at == -1 or split_at < limit // 2:
+            split_at = text.rfind(" ", 0, limit + 1)
+        if split_at == -1 or split_at < limit // 2:
+            return limit
+        return split_at
+
+    @classmethod
+    def compose_transcript_chunks(cls, text, prepend_message=""):
+        prefix = prepend_message or ""
+        base_chunks = cls.split_text_chunks(text)
+        if not base_chunks:
+            return [prefix.strip()] if prefix.strip() else []
+        if not prefix:
+            return base_chunks
+
+        first_limit = max(1, cls.TEXT_CHUNK_LIMIT - len(prefix))
+        normalized_text = (text or "").strip()
+        if not normalized_text:
+            return [prefix.strip()]
+        if len(normalized_text) <= first_limit:
+            return [prefix + normalized_text]
+
+        first_boundary = cls._find_chunk_boundary(normalized_text, first_limit)
+        first_chunk = normalized_text[:first_boundary].strip()
+        remainder = normalized_text[first_boundary:].strip()
+        remaining_chunks = cls.split_text_chunks(remainder)
+        return [prefix + first_chunk] + remaining_chunks
 
     async def send_text_as_file(self, peer_id, text, filename, reply_to=None):
         text_bytes = text.encode('utf-8')
@@ -212,6 +295,71 @@ class ClientHandler:
             await self.client.send_file(peer_id, buffer, reply_to=reply_to)
         else:
             await self.client.send_file(peer_id, buffer)
+
+    async def send_transcript(
+        self,
+        peer_id,
+        text,
+        *,
+        edit_message_id=None,
+        reply_to=None,
+        prepend_message="",
+        prefer_edit=False,
+        is_media_message=False,
+        parse_mode=None,
+    ):
+        parse_mode = parse_mode or self.client.parse_mode
+        chunks = self.compose_transcript_chunks(text, prepend_message=prepend_message)
+        if not chunks:
+            return
+
+        if is_media_message and prefer_edit and edit_message_id is not None:
+            first_chunk = chunks[0]
+            if len(first_chunk) <= self.MEDIA_CAPTION_LIMIT:
+                try:
+                    await self.client.edit_message(peer_id, edit_message_id, first_chunk, parse_mode=parse_mode)
+                    for chunk in chunks[1:]:
+                        await self.client.send_message(peer_id, chunk, reply_to=reply_to or edit_message_id, parse_mode=parse_mode)
+                    return
+                except MediaCaptionTooLongError:
+                    logging.warning("Caption too long for media edit, falling back to replies")
+                except MessageNotModifiedError:
+                    logging.warning("Message not modified")
+
+            notice = prepend_message + self.MEDIA_OVERFLOW_NOTICE if prepend_message else self.MEDIA_OVERFLOW_NOTICE
+            try:
+                await self.client.edit_message(
+                    peer_id,
+                    edit_message_id,
+                    notice[:self.MEDIA_CAPTION_LIMIT],
+                    parse_mode=parse_mode,
+                )
+            except (MediaCaptionTooLongError, MessageNotModifiedError):
+                pass
+
+            for chunk in chunks:
+                await self.client.send_message(
+                    peer_id,
+                    chunk,
+                    reply_to=reply_to or edit_message_id,
+                    parse_mode=parse_mode,
+                )
+            return
+
+        if prefer_edit and edit_message_id is not None:
+            first_chunk = chunks[0]
+            await self.client.edit_message(peer_id, edit_message_id, first_chunk, parse_mode=parse_mode)
+            for chunk in chunks[1:]:
+                await self.client.send_message(
+                    peer_id,
+                    chunk,
+                    reply_to=reply_to or edit_message_id,
+                    parse_mode=parse_mode,
+                )
+            return
+
+        for chunk in chunks:
+            await self.client.send_message(peer_id, chunk, reply_to=reply_to, parse_mode=parse_mode)
 
     async def delete_message(self, peer_id, message_id):
         try:
@@ -262,14 +410,35 @@ class ClientHandler:
 
 class ClientFactory():
     @staticmethod
-    def create_client(client_data) -> 'ClientHandler':
-        sessions_location_directory = '/app/data/sessions/'
-        api_id = os.getenv("API_ID")
-        api_hash = os.getenv("API_HASH")
-        session_name = client_data.get("session_name")
-        client = TelegramClient(sessions_location_directory + session_name + ".session", api_id, api_hash)
+    def create_client(client_data, settings: Settings | None = None) -> 'ClientHandler':
+        settings = settings or load_settings()
+        sessions_location_directory = settings.sessions_dir
+        api_id = settings.api_id
+        api_hash = settings.api_hash
+        session_name = validate_session_name(client_data.get("session_name"))
+        command_objects = [_resolve_command(command) for command in client_data['commands']]
+        session_path = Path(sessions_location_directory) / f"{session_name}.session"
+        client = TelegramClient(str(session_path), api_id, api_hash)
 
-        command_objects = [eval(command) for command in client_data['commands']]
-        handler = ClientHandler(client, command_objects)
+        handler = ClientHandler(client, command_objects, settings=settings, session_name=session_name)
 
         return handler
+
+
+def _resolve_command(command_name: str):
+    if command_name not in COMMAND_MODULES:
+        supported = ", ".join(sorted(COMMAND_MODULES))
+        raise ValueError(
+            f"Unknown command '{command_name}' in configuration. Supported commands: {supported}"
+        )
+
+    module_name, attribute_name = COMMAND_MODULES[command_name]
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ImportError(f"Could not import module '{module_name}' for command '{command_name}'.") from exc
+
+    try:
+        return getattr(module, attribute_name)
+    except AttributeError as exc:
+        raise ImportError(f"Could not load '{attribute_name}' from module '{module_name}'.") from exc

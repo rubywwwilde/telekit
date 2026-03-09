@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telekit"
+version = "0.1.0"
+description = "Telegram self-automation client for voice transcription."
+readme = "README.md"
+# Telethon 1.29.x still imports stdlib modules removed in Python 3.13.
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "Typer==0.9.0",
+  "Telethon==1.29.2",
+  "cryptg==0.5.2",
+  # Telekit still uses the pre-v1 openai.Audio.atranscribe client surface in
+  # job_manager/voice_job.py. Upgrading to OpenAI v1 requires a code migration.
+  "openai==0.27.8",
+  "python-dotenv>=1.0,<2.0",
+  "pydub>=0.25.1,<0.26",
+]
+
+[project.scripts]
+telekit = "app:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<9",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.setuptools]
+py-modules = ["app", "control", "utils", "telekit_config"]
+
+[tool.setuptools.packages.find]
+include = ["commands*", "job_manager*"]

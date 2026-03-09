@@ -1,32 +1,23 @@
-# Use the official image as a parent image
-FROM python:3.9
+FROM python:3.12-slim
 
-# Set work directory
+RUN apt-get update && apt-get install -y \
+    --no-install-recommends build-essential ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /usr/sbin/nologin --uid 1000 telekit
+
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    python3-dev build-essential libssl-dev libffi-dev sqlite3 libsqlite3-dev ffmpeg
+COPY --chown=telekit:telekit . /app
 
-# Copy the current directory contents into the container at /app
-COPY . /app
+ENV PYTHONUNBUFFERED=1
 
-# Create clients.json file with default content
-RUN mkdir -p /app/data/sessions
-RUN touch /app/data/clients.json
+RUN pip install --no-cache-dir .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install python-dotenv
-RUN pip install pydub
+RUN mkdir -p /app/data/sessions /app/jobs
+RUN printf '[]\n' > /app/data/clients.json
+RUN chown -R telekit:telekit /app
 
-# Make port 80 available to the world outside this container
-EXPOSE 80
+USER telekit
 
-# Define environment variables
-ENV NAME OPENAI_API_KEY
-ENV NAME API_ID
-ENV NAME API_HASH
-
-# Run app.py when the container launches
-CMD ["sh", "-c", "python app.py start-program & wait"]
+CMD ["telekit", "start-program"]

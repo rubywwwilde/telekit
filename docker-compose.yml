@@ -1,0 +1,31 @@
+services:
+  telekit:
+    container_name: telekit
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      API_ID: ${API_ID}
+      API_HASH: ${API_HASH}
+      TELEKIT_TRANSCRIPTION_MODEL: ${TELEKIT_TRANSCRIPTION_MODEL:-whisper-1}
+      TELEKIT_DATA_DIR: /app/data
+      TELEKIT_CLIENTS_FILE: /app/data/clients.json
+      TELEKIT_SESSIONS_DIR: /app/data/sessions
+      TELEKIT_JOBS_DIR: /app/jobs
+    volumes:
+      - ./data:/app/data
+      - ./jobs:/app/jobs
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from pathlib import Path; import sys; cmd = Path('/proc/1/cmdline').read_text(); ok = 'telekit' in cmd and Path('/app/data').exists() and Path('/app/data/clients.json').exists(); sys.exit(0 if ok else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

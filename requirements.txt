@@ -1,4 +1,5 @@
-Typer==0.9.0
-Telethon==1.29.2
-cryptg==0.2
-openai==0.27.8
+# Compatibility shim for users still running:
+#   pip install -r requirements.txt
+#
+# The canonical dependency declaration now lives in pyproject.toml.
+.

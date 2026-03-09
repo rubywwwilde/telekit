@@ -2,3 +2,12 @@
 .env
 *.session
 /.idea
+/.pytest_cache/
+/.venv/
+__pycache__/
+*.py[cod]
+/build/
+/dist/
+/telekit.egg-info/
+/jobs/
+/.firecrawl/
